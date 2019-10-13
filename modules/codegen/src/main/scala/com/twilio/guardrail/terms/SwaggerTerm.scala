@@ -162,62 +162,65 @@ case class RouteMeta(path: Tracker[String], method: HttpMethod, operation: Track
     type ParameterCountState = (Count, Map[HashCode, Count])
     val contentTypes: List[RouteMeta.ContentType] =
       requestBody.downField("content", _.getContent()).indexedCosequence.value.map(_._1).flatMap(RouteMeta.ContentType.unapply)
-    val ((maxCount, instances), ps) = requestBody
-      .downField("content", _.getContent())
-      .indexedCosequence
-      .value
-      .flatMap({
-        case (_, mt) =>
-          for {
-            mtSchema <- mt.downField("schema", _.getSchema()).indexedCosequence.toList
-            requiredFields = mtSchema.downField("required", _.getRequired).get.toSet
-            (name, schema) <- mtSchema.downField("properties", _.getProperties()).indexedCosequence.value
-          } yield {
-            val p = new Parameter
+    if (contentTypes.contains(RouteMeta.ApplicationJson)) List()
+    else {
+      val ((maxCount, instances), ps) = requestBody
+        .downField("content", _.getContent())
+        .indexedCosequence
+        .value
+        .flatMap({
+          case (_, mt) =>
+            for {
+              mtSchema <- mt.downField("schema", _.getSchema()).indexedCosequence.toList
+              requiredFields = mtSchema.downField("required", _.getRequired).get.toSet
+              (name, schema) <- mtSchema.downField("properties", _.getProperties()).indexedCosequence.value
+            } yield {
+              val p = new Parameter
 
-            if (schema.downField("format", _.getFormat).get.contains("binary")) {
-              schema.get.setType("file")
-              schema.get.setFormat(null)
+              if (schema.downField("format", _.getFormat).get.contains("binary")) {
+                schema.get.setType("file")
+                schema.get.setFormat(null)
+              }
+
+              p.setName(name)
+              p.setIn("formData")
+              p.setSchema(schema.get)
+
+              val isRequired: Boolean = if (requiredFields.nonEmpty) {
+                requiredFields.contains(name)
+              } else {
+                requestBody.downField("required", _.getRequired()).get.fold(false)(identity)
+              }
+
+              p.setRequired(isRequired)
+              p.setExtensions(schema.unwrapTracker.getExtensions)
+
+              if (schema.downField("type", _.getType()).indexedCosequence.exists(_.get == "file") && contentTypes.contains(RouteMeta.UrlencodedFormData)) {
+                p.setRequired(false)
+              }
+
+              requestBody.map(_ => p)
             }
-
-            p.setName(name)
-            p.setIn("formData")
-            p.setSchema(schema.get)
-
-            val isRequired: Boolean = if (requiredFields.nonEmpty) {
-              requiredFields.contains(name)
-            } else {
-              requestBody.downField("required", _.getRequired()).get.fold(false)(identity)
-            }
-
-            p.setRequired(isRequired)
-            p.setExtensions(schema.unwrapTracker.getExtensions)
-
-            if (schema.downField("type", _.getType()).indexedCosequence.exists(_.get == "file") && contentTypes.contains(RouteMeta.UrlencodedFormData)) {
-              p.setRequired(false)
-            }
-
-            requestBody.map(_ => p)
-          }
-      })
-      .traverse[State[ParameterCountState, ?], Tracker[Parameter]] { p =>
-        State[ParameterCountState, Tracker[Parameter]]({
-          case (maxCount, instances) =>
-            val updated = instances.updated(p.get.hashCode, instances.getOrElse(p.get.hashCode, 0) + 1)
-            ((Math.max(maxCount, updated.values.max), updated), p)
         })
-      }
-      .runEmpty
-      .value
-
-    ps.distinctBy(_.get).map { p =>
-      instances.get(p.hashCode).foreach { count =>
-        // FIXME: Regardless of what the specification says, if a parameter does not appear across all media types, mark it as optional
-        if (count != maxCount) {
-          p.get.setRequired(false)
+        .traverse[State[ParameterCountState, ?], Tracker[Parameter]] { p =>
+          State[ParameterCountState, Tracker[Parameter]]({
+            case (maxCount, instances) =>
+              val updated = instances.updated(p.get.hashCode, instances.getOrElse(p.get.hashCode, 0) + 1)
+              ((Math.max(maxCount, updated.values.max), updated), p)
+          })
         }
+        .runEmpty
+        .value
+
+      ps.distinctBy(_.get).map { p =>
+        instances.get(p.hashCode).foreach { count =>
+          // FIXME: Regardless of what the specification says, if a parameter does not appear across all media types, mark it as optional
+          if (count != maxCount) {
+            p.get.setRequired(false)
+          }
+        }
+        p
       }
-      p
     }
   }
 
